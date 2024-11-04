@@ -4,8 +4,11 @@ This project, E2E DriveAI, is a ROS2-based modular framework designed to enable 
 The framework includes the following components:
 
 **Sensor Data Acquisition and Visualization:** Extract and visualize camera, LiDAR, and OBD data in ROS2.
+
 **Deep Learning for Control Prediction:** Develop and train a deep learning model for predicting control inputs based on camera and LiDAR data. The architecture combines a ResNet-based feature extraction model with a Transformer network to handle temporal dependencies and refine control predictions.
+
 **Vehicle Actuation and Control:** Implement a low-level controller to actuate brake, acceleration, and steering based on predicted inputs.
+
 **Evaluation Scenarios:** Single-lane and multi-lane scenarios with predefined behaviors to evaluate collision avoidance, braking, and lane-changing maneuvers.
 
 **Goals**
