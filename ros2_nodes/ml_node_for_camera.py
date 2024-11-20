@@ -1,6 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
+from obdreader.msg import ResnetFeature
 from cv_bridge import CvBridge
 import cv2
 import torch
@@ -16,6 +17,8 @@ class MLImageNode(Node):
             '/camera/image_raw',
             self.image_callback,
             10)
+
+        self.publisher = self.create_publisher(ResnetFeature, '/image_features', 10)               #to publish the extarcted feature
         self.bridge = CvBridge()
 
         # Define the path to your custom model
@@ -57,8 +60,13 @@ class MLImageNode(Node):
         processed_image = self.preprocess_image(cv_image)
 
         # Perform inference
-        result = self.run_inference(processed_image)
-        print(result)
+        features = self.run_inference(processed_image)
+        H = 62          #these values are obtaiend from pointpillar inference, in order to match 
+        W = 54
+        result = features.unsqueeze(1).repeat(1, H * W, 1)  # [1, 3348, 512]
+
+        print(result.shape)
+        #print(result)
 
         # Handle the result (e.g., log or publish it)
         self.handle_result(result)
@@ -81,8 +89,16 @@ class MLImageNode(Node):
         return result
 
     def handle_result(self, result):
-        # Do something with the result, like publish or log it
-        self.get_logger().info(f"Model output: {result}")
+        # Flatten the tensor and convert it to a list
+        features_list = result.view(-1).tolist()
+
+        # Create a Feature message
+        feature_msg = ResnetFeature()
+        feature_msg.features = features_list
+
+        # Publish the feature message
+        self.publisher.publish(feature_msg)
+        self.get_logger().info(f"Published feature message with {len(features_list)} features")
 
 
 def main(args=None):
