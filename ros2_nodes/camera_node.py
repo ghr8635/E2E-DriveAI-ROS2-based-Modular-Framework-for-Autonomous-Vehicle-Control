@@ -1,7 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
-from obdreader.msg import ResnetFeature
+from obdreader.msg import Feature
 from cv_bridge import CvBridge
 import cv2
 import torch
@@ -18,7 +18,7 @@ class MLImageNode(Node):
             self.image_callback,
             10)
 
-        self.publisher = self.create_publisher(ResnetFeature, '/image_features', 10)               #to publish the extarcted feature
+        self.publisher = self.create_publisher(Feature, '/image_features', 10)
         self.bridge = CvBridge()
 
         # Define the path to your custom model
@@ -46,9 +46,7 @@ class MLImageNode(Node):
         state_dict = torch.load(model_path, map_location=torch.device('cpu'), weights_only=True)
         model.load_state_dict(state_dict)
 
-
         model.fc = torch.nn.Identity()
-       
         return model
 
 
@@ -66,7 +64,6 @@ class MLImageNode(Node):
         result = features.unsqueeze(1).repeat(1, H * W, 1)  # [1, 3348, 512]
 
         print(result.shape)
-        #print(result)
 
         # Handle the result (e.g., log or publish it)
         self.handle_result(result)
@@ -93,7 +90,7 @@ class MLImageNode(Node):
         features_list = result.view(-1).tolist()
 
         # Create a Feature message
-        feature_msg = ResnetFeature()
+        feature_msg = Feature()
         feature_msg.features = features_list
 
         # Publish the feature message
