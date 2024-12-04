@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from custom_msgs.msg import SynchronizedRawData  # Replace with your synchronized message type
 from sensor_msgs.msg import PointCloud2
 from obdreader.msg import Feature
 import numpy as np
@@ -14,9 +15,11 @@ from scripts import voxel_module  # Import your separate voxelization module
 class MLLidarPointPillarsNode(Node):
     def __init__(self):
         super().__init__('ml_lidar_pointpillars_node')
+        
+        # Subscribe to the synchronized data topic
         self.subscription = self.create_subscription(
-            PointCloud2,
-            '/velodyne_points',
+            SynchronizedRawData,
+            '/synchronized_raw_data',
             self.point_cloud_callback,
             10)
 
@@ -58,12 +61,15 @@ class MLLidarPointPillarsNode(Node):
         return model
     
     def point_cloud_callback(self, msg):
+        # Extract the PointCloud2 message from the synchronized message
+        point_cloud_msg = msg.lidar
+
         # Convert PointCloud2 message to numpy array
-        pcd_points = self.convert_pointcloud2_to_array(msg)
+        pcd_points = self.convert_pointcloud2_to_array(point_cloud_msg)
 
         # Preprocess point cloud to fit PointPillars input format
         input_tensor = self.preprocess_point_cloud(pcd_points)
-        print(input_tensor.shape)
+        self.get_logger().info(f"Input tensor shape: {input_tensor.shape}")
 
         # Run inference with the PointPillars model
         features = self.run_pointpillars_inference(input_tensor)
@@ -71,18 +77,34 @@ class MLLidarPointPillarsNode(Node):
 
         # Reshape PointPillars features to [Batch, Seq_Len, Channels]
         pointpillars_features_flat = features.permute(0, 2, 3, 1).reshape(B, H * W, C)  # [1, 3348, 256]
-        print(pointpillars_features_flat.shape)
+        self.get_logger().info(f"PointPillars features shape: {pointpillars_features_flat.shape}")
 
         # Handle the result (e.g., publish detections, log output)
         self.handle_result(pointpillars_features_flat)
 
     def convert_pointcloud2_to_array(self, cloud_msg):
-    # Convert ROS PointCloud2 message to an array (XYZ + intensity)
+        # Convert ROS PointCloud2 message to an array (XYZ + intensity)
         point_cloud = np.frombuffer(cloud_msg.data, dtype=np.float32).reshape(-1, 4)
         return point_cloud
 
-    def clean_and_inspect_data(self, points):
+    def preprocess_point_cloud(self, pcd_points):
+        # Clean and inspect data
+        pcd_points = self.clean_and_inspect_data(pcd_points)
 
+        # Only retain the XYZ coordinates
+        pcd_points = pcd_points[:, :3]  # Shape: (N, 3)
+
+        # Downsample using Open3D voxelization
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pcd_points)
+        downsampled_pcd = pcd.voxel_down_sample(self.voxelizer.voxel_size[0])
+
+        # Convert to numpy and torch tensor
+        downsampled_points = np.asarray(downsampled_pcd.points)
+        input_tensor = torch.tensor(downsampled_points, dtype=torch.float32).unsqueeze(0)
+        return input_tensor
+
+    def clean_and_inspect_data(self, points):
         # Remove NaN/Inf
         points = points[np.isfinite(points).all(axis=1)]
 
@@ -91,44 +113,20 @@ class MLLidarPointPillarsNode(Node):
         points = points[np.isfinite(points).all(axis=1)]
 
         # Final inspection
-        print(f"Final Min value: {np.min(points)}, Max value: {np.max(points)}")
         if points.shape[0] == 0:
             raise ValueError("No valid points remaining after filtering!")
-
         return points
 
-    
-    def preprocess_point_cloud(self, pcd_points):
-        pcd_points = self.clean_and_inspect_data(pcd_points)
-
-        pcd_points = pcd_points[:, :3]  # Shape: (N, 3)
-        print(f"Filtered points shape: {pcd_points.shape}")
-
-        # For example, voxel size (you may need to tune this)
-        voxel_size = 0.2
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(pcd_points)
-        downsampled_pcd = pcd.voxel_down_sample(voxel_size)
-
-        # Convert the downsampled points to numpy array
-        downsampled_points = np.asarray(downsampled_pcd.points)  # Shape: (N', 3)
-
-        # Convert to torch tensor and add batch dimension
-        input_tensor = torch.tensor(downsampled_points, dtype=torch.float32).unsqueeze(0)
-
-        return input_tensor
-
-
     def run_pointpillars_inference(self, input_tensor):
-        # Prepare the input for the model
+        # Run the model inference
         with torch.no_grad():
             output = self.model(input_tensor)
             output = output[-1]
 
-        # Process the model output as required
         return output
 
     def handle_result(self, result):
+        # Flatten the tensor and convert it to a list
         features_list = result.reshape(-1).tolist()
 
         # Create a Feature message
@@ -145,7 +143,6 @@ def main(args=None):
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
-    
-    
+
 if __name__ == '__main__':
     main()

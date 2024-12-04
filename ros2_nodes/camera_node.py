@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from custom_msgs.msg import SynchronizedRawData  # Replace with your synchronized message type
 from obdreader.msg import Feature
 from cv_bridge import CvBridge
 import cv2
@@ -12,9 +12,11 @@ from torchvision import models
 class MLImageNode(Node):
     def __init__(self):
         super().__init__('ml_image_node')
+        
+        # Subscribe to the synchronized data topic
         self.subscription = self.create_subscription(
-            Image,
-            '/camera/image_raw',
+            SynchronizedRawData,
+            '/synchronized_raw_data',
             self.image_callback,
             10)
 
@@ -49,21 +51,23 @@ class MLImageNode(Node):
         model.fc = torch.nn.Identity()
         return model
 
-
     def image_callback(self, msg):
+        # Extract the image from the synchronized message
+        image_msg = msg.image
+
         # Convert ROS Image message to OpenCV image
-        cv_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        cv_image = self.bridge.imgmsg_to_cv2(image_msg, "bgr8")
 
         # Preprocess the image for the custom model
         processed_image = self.preprocess_image(cv_image)
 
         # Perform inference
         features = self.run_inference(processed_image)
-        H = 62          #these values are obtaiend from pointpillar inference, in order to match 
+        H = 62  # These values are obtained from PointPillars inference
         W = 54
         result = features.unsqueeze(1).repeat(1, H * W, 1)  # [1, 3348, 512]
 
-        print(result.shape)
+        self.get_logger().info(f"Feature tensor shape: {result.shape}")
 
         # Handle the result (e.g., log or publish it)
         self.handle_result(result)
@@ -96,7 +100,6 @@ class MLImageNode(Node):
         # Publish the feature message
         self.publisher.publish(feature_msg)
         self.get_logger().info(f"Published feature message with {len(features_list)} features")
-
 
 def main(args=None):
     rclpy.init(args=args)
