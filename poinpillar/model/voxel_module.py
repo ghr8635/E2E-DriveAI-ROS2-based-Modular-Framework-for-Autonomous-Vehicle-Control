@@ -4,6 +4,7 @@ import torch.nn as nn
 class HardVoxelization(torch.nn.Module):
     def __init__(self, voxel_size, point_cloud_range, max_num_points, max_voxels):
         super(HardVoxelization, self).__init__()
+        # Initialize these tensors without device specification
         self.voxel_size = torch.tensor(voxel_size, dtype=torch.float32)
         self.point_cloud_range = torch.tensor(point_cloud_range, dtype=torch.float32)
         self.max_num_points = max_num_points
@@ -17,27 +18,26 @@ class HardVoxelization(torch.nn.Module):
         # Default max_voxels for backward compatibility
         self.max_voxels = self.max_voxels_train
 
-        # Compute the grid size for voxels
-        self.grid_size = ((self.point_cloud_range[3:] - self.point_cloud_range[:3]) / self.voxel_size).int()
+        # Compute the grid size for voxels (this must be done in __init__)
+        self.grid_size = None  # Placeholder, will be computed in forward
 
     def forward(self, points, is_training=True):
+        device = points.device  # Get the device of the input tensor
+        
+        # Move point_cloud_range and voxel_size to the same device as the points tensor
+        point_cloud_range = self.point_cloud_range.to(device)
+        voxel_size = self.voxel_size.to(device)
+        
+        # Compute grid_size on the fly in the forward pass, ensuring it's on the right device
+        self.grid_size = ((point_cloud_range[3:] - point_cloud_range[:3]) / voxel_size).int().to(device)
+        
         # Use appropriate max_voxels based on the training/inference context
         max_voxels = self.max_voxels_train if is_training else self.max_voxels_infer
         
-        """
-        Args:
-            points (Tensor): (N, 3+C) where 3 is x, y, z and C is additional features.
-        
-        Returns:
-            voxels (Tensor): (M, max_num_points, 3+C)
-            coordinates (Tensor): (M, 3)
-            num_points_per_voxel (Tensor): (M,)
-        """
-        device = points.device
         ndim = points.shape[1]
 
         # Step 1: Compute voxel indices
-        voxel_indices = torch.floor((points[:, :3] - self.point_cloud_range[:3]) / self.voxel_size).int()
+        voxel_indices = torch.floor((points[:, :3] - point_cloud_range[:3]) / voxel_size).int()
         mask = ((voxel_indices >= 0) & (voxel_indices < self.grid_size)).all(dim=1)
         points = points[mask]
         voxel_indices = voxel_indices[mask]
@@ -94,3 +94,4 @@ if __name__ == "__main__":
     print("Voxels shape:", voxels.shape)
     print("Coordinates shape:", coordinates.shape)
     print("Num points per voxel shape:", num_points.shape)
+
