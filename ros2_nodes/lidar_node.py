@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from custom_msgs.msg import SynchronizedRawData  # Replace with your synchronized message type
+from obdreader.msg import SynchronizedRawData  # Replace with your synchronized message type
 from sensor_msgs.msg import PointCloud2
 from obdreader.msg import Feature
 import numpy as np
@@ -12,6 +12,41 @@ from scripts import pointpillars
 from scripts import voxel_module  # Import your separate voxelization module
 
 
+class PillarFeatureExtractor(nn.Module):
+    """
+    Wraps the submodules of PointPillars model so that forward() returns a feature vector (e.g. 512D).
+    """
+    def __init__(self, original_model: pointpillars.PointPillars, fc_dim=512):
+        super().__init__()
+        self.pillar_layer = original_model.pillar_layer
+        self.pillar_encoder = original_model.pillar_encoder
+        self.backbone = original_model.backbone
+        self.neck = original_model.neck
+
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        # The '384' in the Linear below corresponds to the channel dimension
+        self.fc = nn.Linear(384, fc_dim)
+
+    def forward(self, batched_pts):
+        """
+        :param batched_pts: list of Tensors (length = batch_size)
+        """
+        # Pillar features
+        pillars, coors_batch, npoints_per_pillar = self.pillar_layer(batched_pts)
+        pillar_features = self.pillar_encoder(pillars, coors_batch, npoints_per_pillar)
+
+        # Backbone + Neck
+        xs = self.backbone(pillar_features)
+        feats = self.neck(xs)
+
+        # Pool down to a single vector per sample
+        pooled = self.pool(feats)  # shape [B, C, 1, 1]
+        pooled = pooled.view(pooled.size(0), -1)  # shape [B, C]
+
+        out_512 = self.fc(pooled)  # shape [B, fc_dim]
+        return out_512
+
+
 class MLLidarPointPillarsNode(Node):
     def __init__(self):
         super().__init__('ml_lidar_pointpillars_node')
@@ -19,14 +54,14 @@ class MLLidarPointPillarsNode(Node):
         # Subscribe to the synchronized data topic
         self.subscription = self.create_subscription(
             SynchronizedRawData,
-            '/synchronized_raw_data',
+            '/synchronized_raw_data_with_features',
             self.point_cloud_callback,
             10)
 
-        self.publisher = self.create_publisher(Feature, '/pp_features', 10)
+        self.publisher = self.create_publisher(Feature, 'combined_features', 10)
 
         # Load the PointPillars model
-        model_path = Path("/home/linux1/ros2_new_ws/src/ams_motor_drive/scripts/epoch_160.pth")
+        model_path = Path("/home/schenker3/Desktop/ros2_ws/src/ams_motor_drive/scripts/epoch_160.pth")
         self.model = self.load_pointpillars_model(model_path)
         self.model.eval()  # Set model to evaluation mode
 
@@ -50,78 +85,67 @@ class MLLidarPointPillarsNode(Node):
             max_voxels=(16000, 40000)
         )
 
-        model_state_dict = torch.load(model_path, map_location=torch.device('cpu'))
+        model_state_dict = torch.load(model_path, map_location=torch.device('cuda'), weights_only=True)
+
         # Load the filtered state dict into the model (without the head weights)
         model.load_state_dict(model_state_dict, strict=False)
-
-        # Replace the head layer with Identity
-        model.neck = nn.Identity()
-        model.head = nn.Identity()
 
         return model
     
     def point_cloud_callback(self, msg):
         # Extract the PointCloud2 message from the synchronized message
-        point_cloud_msg = msg.lidar
+        point_cloud_msg = msg.pointcloud
 
         # Convert PointCloud2 message to numpy array
         pcd_points = self.convert_pointcloud2_to_array(point_cloud_msg)
 
         # Preprocess point cloud to fit PointPillars input format
-        input_tensor = self.preprocess_point_cloud(pcd_points)
+        input_tensor = self.load_xyz_intensity_from_pcd(pcd_points)
         self.get_logger().info(f"Input tensor shape: {input_tensor.shape}")
 
         # Run inference with the PointPillars model
-        features = self.run_pointpillars_inference(input_tensor)
-        B, C, H, W = features.shape  # B=1, C=256, H=62, W=54
+        features_pcd = self.run_pointpillars_inference(input_tensor)
+        self.get_logger().info(f"PointPillars features shape: {features_pcd.shape}")
 
-        # Reshape PointPillars features to [Batch, Seq_Len, Channels]
-        pointpillars_features_flat = features.permute(0, 2, 3, 1).reshape(B, H * W, C)  # [1, 3348, 256]
-        self.get_logger().info(f"PointPillars features shape: {pointpillars_features_flat.shape}")
+        # Extract the image features from the synchronized message
+        features_img = msg.features  # Assuming features from image are already in the message
+        features_img = torch.tensor(features_img, dtype=torch.float32).to('cuda')
+
+        # Combine features from image and point cloud into a single tensor
+        combined_features = torch.cat((features_img, features_pcd), dim=0)
+        self.get_logger().info(f"Combined features shape: {combined_features.shape}")
 
         # Handle the result (e.g., publish detections, log output)
-        self.handle_result(pointpillars_features_flat)
+        self.handle_result(combined_features)
 
     def convert_pointcloud2_to_array(self, cloud_msg):
         # Convert ROS PointCloud2 message to an array (XYZ + intensity)
         point_cloud = np.frombuffer(cloud_msg.data, dtype=np.float32).reshape(-1, 4)
         return point_cloud
 
-    def preprocess_point_cloud(self, pcd_points):
-        # Clean and inspect data
-        pcd_points = self.clean_and_inspect_data(pcd_points)
+    def load_xyz_intensity_from_pcd(self, point_cloud):
+        """
+        Reads .pcd with x,y,z + intensity embedded in colors.
+        Returns a PyTorch tensor of shape [1, N, 4], where N is the number of points.
+        """
+        
+        # Directly create the tensor for xyz and intensity
+        xyz_tensor = torch.tensor(point_cloud[:, :3], dtype=torch.float32).to('cuda')  # Shape: (N, 3)
+        intensity_tensor = torch.tensor(point_cloud[:, 3], dtype=torch.float32).reshape(-1, 1).to('cuda')  # Shape: (N, 1)
 
-        # Only retain the XYZ coordinates
-        pcd_points = pcd_points[:, :3]  # Shape: (N, 3)
+        # Concatenate xyz and intensity tensors directly
+        points_tensor = torch.cat([xyz_tensor, intensity_tensor], dim=1)  # Shape: (N, 4)
 
-        # Downsample using Open3D voxelization
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(pcd_points)
-        downsampled_pcd = pcd.voxel_down_sample(self.voxelizer.voxel_size[0])
+        # Add batch dimension to make it [1, N, 4]
+        points_tensor = points_tensor.unsqueeze(0)  # Shape: (1, N, 4)
 
-        # Convert to numpy and torch tensor
-        downsampled_points = np.asarray(downsampled_pcd.points)
-        input_tensor = torch.tensor(downsampled_points, dtype=torch.float32).unsqueeze(0)
-        return input_tensor
-
-    def clean_and_inspect_data(self, points):
-        # Remove NaN/Inf
-        points = points[np.isfinite(points).all(axis=1)]
-
-        # Remove extremely large/small values
-        points[np.abs(points) > 1e6] = np.nan
-        points = points[np.isfinite(points).all(axis=1)]
-
-        # Final inspection
-        if points.shape[0] == 0:
-            raise ValueError("No valid points remaining after filtering!")
-        return points
-
+        return points_tensor
     def run_pointpillars_inference(self, input_tensor):
         # Run the model inference
+        feature_extractor = PillarFeatureExtractor(self.model).to("cuda")
         with torch.no_grad():
-            output = self.model(input_tensor)
-            output = output[-1]
+            features = feature_extractor(input_tensor)
+        output = features[0]  # Shape will be [512]
 
         return output
 
