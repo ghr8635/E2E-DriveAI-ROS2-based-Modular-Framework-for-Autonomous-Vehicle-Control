@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from model.voxel_module import Voxelization
+from scripts.voxel_module import Voxelization
 
 
 class PillarLayer(nn.Module):
@@ -46,9 +46,8 @@ class PillarEncoder(nn.Module):
         offset_pt_center = pillars[:, :, :3] - torch.sum(pillars[:, :, :3], dim=1, keepdim=True) / npoints_per_pillar[:, None, None]
         x_offset_pi_center = pillars[:, :, :1] - (coors_batch[:, None, 1:2] * self.vx + self.x_offset)
         y_offset_pi_center = pillars[:, :, 1:2] - (coors_batch[:, None, 2:3] * self.vy + self.y_offset)
-        distances = torch.norm(pillars[:, :, :3], dim=-1, keepdim=True)
 
-        features = torch.cat([pillars, offset_pt_center, x_offset_pi_center, y_offset_pi_center, distances], dim=-1)
+        features = torch.cat([pillars, offset_pt_center, x_offset_pi_center, y_offset_pi_center], dim=-1)
         voxel_ids = torch.arange(0, pillars.size(1)).to(pillars.device)
         mask = voxel_ids[:, None] < npoints_per_pillar[None, :]
         mask = mask.permute(1, 0).contiguous()
@@ -108,21 +107,33 @@ class Neck(nn.Module):
         self.decoder_blocks = nn.ModuleList()
         for i in range(len(in_channels)):
             decoder_block = []
-            decoder_block.append(nn.ConvTranspose2d(in_channels[i], 
-                                                    out_channels[i], 
-                                                    upsample_strides[i], 
-                                                    stride=upsample_strides[i],
-                                                    bias=False))
+            decoder_block.append(nn.ConvTranspose2d(
+                in_channels[i], 
+                out_channels[i], 
+                upsample_strides[i], 
+                stride=upsample_strides[i],
+                bias=False))
             decoder_block.append(nn.BatchNorm2d(out_channels[i], eps=1e-3, momentum=0.01))
             decoder_block.append(nn.ReLU(inplace=True))
 
             self.decoder_blocks.append(nn.Sequential(*decoder_block))
 
     def forward(self, x):
+        '''
+        Original commented code:
         outs = []
         for xi in x:
             outs.append(self.decoder_blocks(xi))
         return torch.cat(outs, dim=1)
+        '''
+        
+        outs = []
+        for i, seq_block in enumerate(self.decoder_blocks):
+            out = seq_block(x[i])  # if you have three blocks and three inputs
+            outs.append(out)
+        # Then combine
+        out = torch.cat(outs, dim=1)
+        return out
 
 
 class PointPillars(nn.Module):
@@ -155,25 +166,3 @@ class PointPillars(nn.Module):
         backbone_outs = self.backbone(features)
         neck_out = self.neck(backbone_outs)
         return neck_out
-
-
-def preprocess_point_cloud(pcd_points):
-    """
-    Preprocess point cloud data into the expected feature set for PointPillars.
-    
-    Args:
-        pcd_points (numpy.ndarray): Nx3 or Nx4 (x, y, z, intensity).
-    
-    Returns:
-        torch.Tensor: Preprocessed tensor (B, N, C), where C includes necessary features.
-    """
-    num_points = pcd_points.shape[0]
-    intensity = pcd_points[:, 3:4] if pcd_points.shape[1] > 3 else np.ones((num_points, 1))  # Placeholder intensity
-
-    min_coords = np.min(pcd_points[:, :3], axis=0)
-    max_coords = np.max(pcd_points[:, :3], axis=0)
-    normalized_coords = (pcd_points[:, :3] - min_coords) / (max_coords - min_coords + 1e-6)
-    distances = np.linalg.norm(pcd_points[:, :3], axis=1, keepdims=True)
-
-    features = np.hstack((pcd_points[:, :3], intensity, normalized_coords, distances))
-    return torch.tensor(features, dtype=torch.float32).unsqueeze(0)
