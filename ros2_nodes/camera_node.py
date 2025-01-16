@@ -24,7 +24,7 @@ class MLImageNode(Node):
         self.bridge = CvBridge()
 
         # Define the path to your custom model
-        model_path = Path("/home/linux1/ros2_new_ws/src/ams_motor_drive/scripts/feature_extractor_resnet18.pth")
+        model_path = Path("resnet18/trained models/feature_extractor_resnet18.pth")
 
         # Load your custom model (adjust the model structure if necessary)
         self.model = self.load_trained_model(model_path)
