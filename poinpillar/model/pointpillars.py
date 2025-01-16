@@ -2,13 +2,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from scripts.voxel_module import Voxelization
+from ops import voxel_module
 
+
+import time
 
 class PillarLayer(nn.Module):
     def __init__(self, voxel_size, point_cloud_range, max_num_points, max_voxels):
         super().__init__()
-        self.voxel_layer = Voxelization(voxel_size=voxel_size,
+        self.voxel_layer = voxel_module.Voxelization(voxel_size=voxel_size,
                                         point_cloud_range=point_cloud_range,
                                         max_num_points=max_num_points,
                                         max_voxels=max_voxels)
@@ -17,11 +19,22 @@ class PillarLayer(nn.Module):
     def forward(self, batched_pts):
         pillars, coors, npoints_per_pillar = [], [], []
         for pts in batched_pts:
+            # Start timing
+            start_time = time.time()
+            
+            # Voxelization operation
             voxels_out, coors_out, num_points_per_voxel_out = self.voxel_layer(pts)
+            
+            # End timing
+            end_time = time.time()
+            
+            # Print the time taken for voxelization
+            print(f"Time taken for voxel_layer(pts): {end_time - start_time:.4f} seconds")
+            
             pillars.append(voxels_out)
             coors.append(coors_out.long())
             npoints_per_pillar.append(num_points_per_voxel_out)
-
+        print("check1")
         pillars = torch.cat(pillars, dim=0) 
         npoints_per_pillar = torch.cat(npoints_per_pillar, dim=0)
         coors_batch = [F.pad(cur_coors, (1, 0), value=i) for i, cur_coors in enumerate(coors)]
