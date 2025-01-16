@@ -61,7 +61,7 @@ class MLLidarPointPillarsNode(Node):
         self.publisher = self.create_publisher(Feature, 'combined_features', 10)
 
         # Load the PointPillars model
-        model_path = Path("/home/schenker3/Desktop/ros2_ws/src/ams_motor_drive/scripts/epoch_160.pth")
+        model_path = Path("pointpillar/pre_trained/epoch_160.pth")
         self.model = self.load_pointpillars_model(model_path)
         self.model.eval()  # Set model to evaluation mode
 
