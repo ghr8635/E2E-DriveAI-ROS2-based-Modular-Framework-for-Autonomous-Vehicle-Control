@@ -25,7 +25,7 @@ class TransformerNode(Node):
         self.buffer = deque(maxlen=25)  # Deque will automatically discard the oldest element when the buffer is full
 
         # Load the Transformer model
-        model_path = Path("/home/schenker3/Desktop/ros2_ws/src/ams_motor_drive/scripts/driving_transformer.pt")
+        model_path = Path("transformer/pre_trained/driving_transformer.pt")
         self.model = self.load_transformer_model(model_path)
         self.model.eval().to(self.device)  # Set model to evaluation mode and move to CUDA
 
