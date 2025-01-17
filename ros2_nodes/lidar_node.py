@@ -9,42 +9,55 @@ import torch
 import torch.nn as nn
 from pathlib import Path
 from scripts import pointpillars
-from scripts import voxel_module  # Import your separate voxelization module
+from ops import voxel_module # Import your separate voxelization module
 
+    
+import time
 
 class PillarFeatureExtractor(nn.Module):
-    """
-    Wraps the submodules of PointPillars model so that forward() returns a feature vector (e.g. 512D).
-    """
     def __init__(self, original_model: pointpillars.PointPillars, fc_dim=512):
         super().__init__()
         self.pillar_layer = original_model.pillar_layer
         self.pillar_encoder = original_model.pillar_encoder
         self.backbone = original_model.backbone
         self.neck = original_model.neck
-
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        # The '384' in the Linear below corresponds to the channel dimension
         self.fc = nn.Linear(384, fc_dim)
 
     def forward(self, batched_pts):
-        """
-        :param batched_pts: list of Tensors (length = batch_size)
-        """
-        # Pillar features
+        timings = {}
+
+        start_time = time.time()
         pillars, coors_batch, npoints_per_pillar = self.pillar_layer(batched_pts)
+        timings["pillar_layer"] = time.time() - start_time
+
+        start_time = time.time()
         pillar_features = self.pillar_encoder(pillars, coors_batch, npoints_per_pillar)
+        timings["pillar_encoder"] = time.time() - start_time
 
-        # Backbone + Neck
+        start_time = time.time()
         xs = self.backbone(pillar_features)
+        timings["backbone"] = time.time() - start_time
+
+        start_time = time.time()
         feats = self.neck(xs)
+        timings["neck"] = time.time() - start_time
 
-        # Pool down to a single vector per sample
-        pooled = self.pool(feats)  # shape [B, C, 1, 1]
-        pooled = pooled.view(pooled.size(0), -1)  # shape [B, C]
+        start_time = time.time()
+        pooled = self.pool(feats)
+        pooled = pooled.view(pooled.size(0), -1)
+        timings["pooling"] = time.time() - start_time
 
-        out_512 = self.fc(pooled)  # shape [B, fc_dim]
+        start_time = time.time()
+        out_512 = self.fc(pooled)
+        timings["fc"] = time.time() - start_time
+
+        # Print the timing information
+        for stage, duration in timings.items():
+            print(f"{stage}: {duration:.6f} seconds")
+
         return out_512
+
 
 
 class MLLidarPointPillarsNode(Node):
@@ -66,7 +79,7 @@ class MLLidarPointPillarsNode(Node):
         self.model.eval()  # Set model to evaluation mode
 
         # Initialize voxelization parameters using the separate module
-        self.voxelizer = voxel_module.HardVoxelization(
+        self.voxelizer = voxel_module.Voxelization(
             voxel_size=[0.16, 0.16, 4],
             point_cloud_range=[0, -39.68, -3, 69.12, 39.68, 1],
             max_num_points=32,
@@ -125,13 +138,29 @@ class MLLidarPointPillarsNode(Node):
 
     def load_xyz_intensity_from_pcd(self, point_cloud):
         """
-        Reads .pcd with x,y,z + intensity embedded in colors.
+        Reads .pcd with x, y, z + intensity embedded in colors.
         Returns a PyTorch tensor of shape [1, N, 4], where N is the number of points.
         """
         
         # Directly create the tensor for xyz and intensity
         xyz_tensor = torch.tensor(point_cloud[:, :3], dtype=torch.float32).to('cuda')  # Shape: (N, 3)
         intensity_tensor = torch.tensor(point_cloud[:, 3], dtype=torch.float32).reshape(-1, 1).to('cuda')  # Shape: (N, 1)
+
+        # Remove points with NaN values in xyz or intensity
+        valid_mask = ~torch.isnan(xyz_tensor).any(dim=1) & ~torch.isnan(intensity_tensor).any(dim=1)
+        xyz_tensor = xyz_tensor[valid_mask]
+        intensity_tensor = intensity_tensor[valid_mask]
+
+        # Print min and max values for x, y, z
+        min_x = torch.min(xyz_tensor[:, 0])  # Minimum value in x
+        min_y = torch.min(xyz_tensor[:, 1])  # Minimum value in y
+        min_z = torch.min(xyz_tensor[:, 2])  # Minimum value in z
+        max_x = torch.max(xyz_tensor[:, 0])  # Maximum value in x
+        max_y = torch.max(xyz_tensor[:, 1])  # Maximum value in y
+        max_z = torch.max(xyz_tensor[:, 2])  # Maximum value in z
+
+        print(f"Min values - x: {min_x.item()}, y: {min_y.item()}, z: {min_z.item()}")
+        print(f"Max values - x: {max_x.item()}, y: {max_y.item()}, z: {max_z.item()}")
 
         # Concatenate xyz and intensity tensors directly
         points_tensor = torch.cat([xyz_tensor, intensity_tensor], dim=1)  # Shape: (N, 4)
@@ -140,12 +169,13 @@ class MLLidarPointPillarsNode(Node):
         points_tensor = points_tensor.unsqueeze(0)  # Shape: (1, N, 4)
 
         return points_tensor
+    
     def run_pointpillars_inference(self, input_tensor):
         # Run the model inference
         feature_extractor = PillarFeatureExtractor(self.model).to("cuda")
         with torch.no_grad():
             features = feature_extractor(input_tensor)
-        output = features[0]  # Shape will be [512]
+        output = features[0]  
 
         return output
 

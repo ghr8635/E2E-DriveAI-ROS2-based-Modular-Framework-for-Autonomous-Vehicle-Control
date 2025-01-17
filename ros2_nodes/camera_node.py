@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from custom_msgs.msg import SynchronizedRawData  # Replace with your synchronized message type
+from obdreader.msg import SynchronizedRawData  # Replace with your synchronized message type
 from obdreader.msg import Feature
 from cv_bridge import CvBridge
 import cv2
@@ -62,10 +62,7 @@ class MLImageNode(Node):
         processed_image = self.preprocess_image(cv_image)
 
         # Perform inference
-        features = self.run_inference(processed_image)
-        H = 62  # These values are obtained from PointPillars inference
-        W = 54
-        result = features.unsqueeze(1).repeat(1, H * W, 1)  # [1, 3348, 512]
+        result = self.run_inference(processed_image)
 
         self.get_logger().info(f"Feature tensor shape: {result.shape}")
 
@@ -86,7 +83,7 @@ class MLImageNode(Node):
         with torch.no_grad():
             output = self.model(image)
         # Convert the output to a usable format (e.g., feature vector or classification result)
-        result = output  # Process according to your model's output format
+        result = output[0]
         return result
 
     def handle_result(self, result):
